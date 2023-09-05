@@ -1,0 +1,8 @@
+# FastAPI Specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+alembic/env.py
+alembic/versions/
+.venv/
