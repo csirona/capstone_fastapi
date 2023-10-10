@@ -7,7 +7,7 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
-DATABASE_URL = "mysql+mysqlconnector://root:passwordmysql@localhost/parking_app_db"
+DATABASE_URL = "postgresql+psycopg2://parking:passwordpsql@localhost/dbparking"
 
 database = Database(DATABASE_URL)
 Base = declarative_base()
@@ -23,7 +23,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(255), index=True)
     email = Column(String(255))
-    # Establish a bidirectional one-to-many relationship with cars
+    last_connection = Column(DateTime(timezone=True), server_default=func.now())
+    created_date = Column(DateTime(timezone=True), server_default=func.now())  # Add this field
     cars = relationship("Car", back_populates="user")
     hashed_password = Column(String(255))  # Add this field for hashed passwords
 

@@ -1,15 +1,15 @@
 from fastapi import FastAPI, HTTPException, Depends, Response
 from sqlalchemy.orm import Session
-from db import connect_to_db, disconnect_from_db, SessionLocal, User, Wallet, Card, Car,fetch_user_from_db, ParkingHistory,get_car
+from db import connect_to_db, disconnect_from_db, SessionLocal, User, Wallet, Card, Car, fetch_user_from_db, ParkingHistory, get_car
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from db import SessionLocal
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
+import uvicorn
 
 app = FastAPI()
 
@@ -17,7 +17,7 @@ origins = ["*"]  # Add your frontend URLs
 
 # JWT configuration
 SECRET_KEY = "9a906627c7d4dac428f7ca952626b15e4cae78aa8f784527637f46ed5aba1eaa"
-ALGORITHM = "HS256"
+ALGORITHM = "HS512"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -37,7 +37,6 @@ class UserCreate(BaseModel):
     username: str
     email: str
     hashed_password: str
-
 
 # Token model
 class Token(BaseModel):
@@ -76,7 +75,15 @@ class CarResponse(BaseModel):
     id: int
     user_id: int
     license_plate: str
-    
+
+# Pydantic model for user response
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    hashed_password: str
+    last_connection: Optional[datetime]
+    created_date: Optional[datetime]
 
 # User authentication
 def authenticate_user(db_user: User, password: str):
@@ -84,17 +91,27 @@ def authenticate_user(db_user: User, password: str):
         return False
     return True
 
-# Create a JWT token
+# Create a JWT token with "iat" claim
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "iat": datetime.utcnow()})  # Add "iat" claim
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+
+# Function to get the database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Function to get the current user based on the JWT token
 def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -108,13 +125,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         return db_user
     except JWTError:
         raise HTTPException(status_code=401, detail="Token validation failed")
-# Function to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+
 
 # Login route
 @app.post("/login", response_model=Token)
@@ -126,7 +137,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     if db_user and pwd_context.verify(password, db_user.hashed_password):
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": username}, expires_delta=access_token_expires
+            data={"sub": username,"user_id": db_user.id}, expires_delta=access_token_expires
         )
         return {"access_token": access_token, "token_type": "bearer"}
     else:
@@ -136,7 +147,6 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 @app.get("/protected")
 async def protected_route(current_user: User = Depends(get_current_user)):
     return {"message": "This is a protected resource"}
-
 
 @app.on_event("startup")
 async def startup():
@@ -160,30 +170,55 @@ async def create_user(user_data: UserCreate):
     except Exception as e:
         return {"message": f"Error creating user: {str(e)}"}
 
-# Pydantic model for user response
-class UserResponse(BaseModel):
-    id: int
-    username: str
-    email: str
-    hashed_password : str
-
 # Add a route to list all users
-@app.get("/users/", response_model=List[UserResponse])  # Use the UserResponse model
-async def list_users():
-    db = SessionLocal()
+@app.get("/users/", response_model=List[UserResponse])
+async def list_users(db: Session = Depends(get_db)):
     users = db.query(User).all()
     db.close()
-    return users
+    user_responses = []
+    for user in users:
+        user_response = UserResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            hashed_password=user.hashed_password,
+            last_connection = user.last_connection if user.last_connection else None,
+            created_date=user.created_date,
+        )
+        user_responses.append(user_response)
+    return user_responses
+
 
 # Get a user by ID
-@app.get("/users/{user_id}")
-async def get_user(user_id: int):
-    db = SessionLocal()
+@app.get("/users/{user_id}", response_model=UserResponse)
+async def get_user(user_id: int, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
-    db.close()
-    if user is None:
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return user
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        hashed_password=user.hashed_password,
+        last_connection=user.last_connection if user.last_connection else None,
+        created_date=user.created_date,
+    )
+
+# Get a user by username
+@app.get("/users/by-username/{username}", response_model=UserResponse)
+async def get_user_by_username(username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        hashed_password=user.hashed_password,
+        last_connection=user.last_connection if user.last_connection else None,
+        created_date=user.created_date,
+    )
+
 
 # Create a new wallet
 @app.post("/wallets/")
@@ -210,7 +245,7 @@ async def get_wallet(wallet_id: int):
 
 # Create a new card
 @app.post("/cards/")
-async def create_card(card_data: CarCreate):
+async def create_card(card_data: CardCreate):
     db = SessionLocal()
     new_card = Card(user_id=card_data.user_id, card_number=card_data.card_number)
     db.add(new_card)
@@ -226,6 +261,7 @@ async def get_card(card_id: int):
     db.close()
     if card is None:
         raise HTTPException(status_code=404, detail="Card not found")
+
     return card
 
 @app.post("/cars/")
@@ -240,14 +276,15 @@ async def create_car(car_data: CarCreate):
     except Exception as e:
         return {"message": f"Error creating car: {str(e)}"}
 
-# Get a car by ID
-@app.get("/cars/{user_id}")
-async def get_car(user_id: int):
+# Get cars by user ID
+@app.get("/cars/{user_id}", response_model=List[CarResponse])
+async def get_cars(user_id: int):
     db = SessionLocal()
     cars = db.query(Car).filter(Car.user_id == user_id).all()
     db.close()
-    if cars is None:
-        raise HTTPException(status_code=404, detail="Car not found")
+    if not cars:
+        raise HTTPException(status_code=404, detail="No cars found for this user")
+
     return cars
 
 class ParkingHistoryCreate(BaseModel):
@@ -257,7 +294,7 @@ class ParkingHistoryResponse(BaseModel):
     id: int
     date: Optional[datetime]
 
-@app.post("/parking-history/", response_model=dict)
+@app.post("/parking-history/", response_model=Dict[str, str])
 async def create_parking_history(parking_history_data: ParkingHistoryCreate, response: Response):
     db = SessionLocal()
     try:
@@ -278,7 +315,6 @@ async def create_parking_history(parking_history_data: ParkingHistoryCreate, res
     finally:
         db.close()
 
-
 @app.get("/parking-history/{car_id}", response_model=List[ParkingHistoryResponse])
 async def get_parking_history(car_id: int):
     db = SessionLocal()
@@ -295,10 +331,5 @@ async def get_parking_history(car_id: int):
     finally:
         db.close()
 
-
-
-
-
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
